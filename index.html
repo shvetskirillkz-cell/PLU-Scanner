@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0f172a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>PLU Сканер ИИ</title>
+<title>PLU Сканер</title>
 <style>
   :root {
     --bg: #0b1120;
@@ -605,10 +605,10 @@
     </div>
     <p style="font-size:13px;color:var(--text-muted);line-height:1.45;">
       Режим работы: <strong id="modalEngineInfo" style="color:var(--text);">Готов (фокус на рамке)</strong>.<br>
-      Анализируется область внутри рамки, сглаживание убирает метание между PLU, а кнопка подтверждения добавляет удачные кадры в базу товара.
+      Быстрое переключение между товарами и сброс при пустом кадре помогают избежать залипания на прошлом PLU.
     </p>
     <div class="modal-actions">
-      <button class="btn" id="resetStabilizerBtn">🎯 Сбросить стабилизацию кадров</button>
+      <button class="btn" id="resetStabilizerBtn">🎯 Сбросить текущий товар</button>
       <button class="btn" id="restoreBackupBtn">🛟 Восстановить базу из резервной копии</button>
       <button class="btn btn-danger" id="clearAllDataBtn">🗑️ Сбросить локальные данные</button>
     </div>
@@ -627,9 +627,10 @@
   const BACKUP_KEY = 'plu_scanner_backup_v3';
 
   const ROI_RATIO = 0.64;
-  const HISTORY_SIZE = 7;
+  const HISTORY_SIZE = 4;
+  const SCAN_INTERVAL_MS = 250;
   const MIN_MATCH_SCORE = 0.72;
-  const STRONG_MATCH_SCORE = 0.81;
+  const STRONG_MATCH_SCORE = 0.80;
 
   let products = [];
   let stream = null;
@@ -639,7 +640,7 @@
 
   let voteHistory = [];
   let lockedProduct = null;
-  let lockedStreak = 0;
+  let emptyStreak = 0;
 
   const video = document.getElementById('video');
   const cropCanvas = document.getElementById('cropCanvas');
@@ -676,7 +677,17 @@
   function resetStabilizer() {
     voteHistory = [];
     lockedProduct = null;
-    lockedStreak = 0;
+    emptyStreak = 0;
+    syncConfirmButton();
+  }
+
+  function showIdlePrompt(statusLabel = 'Поиск...', nameLabel = 'Поместите товар в рамку') {
+    document.getElementById('mainPlu').textContent = '----';
+    document.getElementById('mainName').textContent = nameLabel;
+    document.getElementById('pluCopyBox').classList.add('dimmed');
+    const st = document.getElementById('matchStatus');
+    st.textContent = statusLabel;
+    st.className = 'status-pill unknown';
     syncConfirmButton();
   }
 
@@ -771,7 +782,7 @@
       sumLum += lum;
     }
     const meanLum = sumLum / nPixels || 0.5;
-    const gain = Math.min(1.8, Math.max(0.55, 0.48 / Math.max(0.12, meanLum)));
+    const gain = Math.min(1.6, Math.max(0.6, 0.48 / Math.max(0.15, meanLum)));
 
     const histH = new Float32Array(18);
     const histS = new Float32Array(6);
@@ -914,7 +925,7 @@
     }
     video.srcObject = null;
     resetStabilizer();
-    cameraOverlayText.textContent = 'Камера выключена';
+    cameraOverlayText.textContent = 'Нажмите «Включить камеру» для начала работы';
     cameraOverlay.classList.remove('hidden');
     document.getElementById('toggleCameraBtn').textContent = '▶️ Вкл. камеру';
   }
@@ -936,88 +947,78 @@
         .map(p => ({ product: p, score: scoreProduct(vec, p) }))
         .sort((a, b) => b.score - a.score);
 
-      updateStabilizedResult(scored);
+      updateLiveResult(scored);
       syncConfirmButton();
-    }, 350);
+    }, SCAN_INTERVAL_MS);
   }
 
-  function updateStabilizedResult(scored) {
+  function updateLiveResult(scored) {
     const top = scored[0];
-    const second = scored[1];
-    const margin = second ? top.score - second.score : 1;
+    const hasStrongTop = Boolean(top && top.score >= MIN_MATCH_SCORE);
+    const candidatePlu = hasStrongTop ? top.product.plu : null;
 
-    const candidate = (top && top.score >= MIN_MATCH_SCORE) ? top.product.plu : null;
-    voteHistory.push(candidate);
-    if (voteHistory.length > HISTORY_SIZE) voteHistory.shift();
+    if (!candidatePlu) {
+      emptyStreak++;
+      voteHistory.push(null);
+      if (voteHistory.length > HISTORY_SIZE) voteHistory.shift();
 
-    const counts = {};
-    for (const plu of voteHistory) {
-      if (plu) counts[plu] = (counts[plu] || 0) + 1;
-    }
-
-    let bestPlu = null;
-    let bestVotes = 0;
-    for (const [plu, c] of Object.entries(counts)) {
-      if (c > bestVotes) {
-        bestVotes = c;
-        bestPlu = plu;
-      }
-    }
-
-    const statusEl = document.getElementById('matchStatus');
-    const boxEl = document.getElementById('pluCopyBox');
-    const pluEl = document.getElementById('mainPlu');
-    const nameEl = document.getElementById('mainName');
-
-    if (lockedProduct) {
-      const currentLockedScoreObj = scored.find(s => s.product.plu === lockedProduct.plu);
-      const lockedScore = currentLockedScoreObj ? currentLockedScoreObj.score : 0;
-
-      if (bestPlu === lockedProduct.plu && lockedScore >= MIN_MATCH_SCORE - 0.04) {
-        lockedStreak++;
-        pluEl.textContent = lockedProduct.plu;
-        nameEl.textContent = lockedProduct.name;
-        boxEl.classList.remove('dimmed');
-        statusEl.textContent = lockedScore >= STRONG_MATCH_SCORE ? 'Товар определён' : 'Удержание';
-        statusEl.className = 'status-pill';
-      } else if (bestPlu && bestPlu !== lockedProduct.plu && bestVotes >= 4 && margin >= 0.04) {
-        const nextProd = products.find(p => p.plu === bestPlu);
-        if (nextProd) {
-          lockedProduct = nextProd;
-          lockedStreak = 1;
-          pluEl.textContent = nextProd.plu;
-          nameEl.textContent = nextProd.name;
-          boxEl.classList.remove('dimmed');
-          statusEl.textContent = 'Товар определён';
-          statusEl.className = 'status-pill';
-        }
-      } else if (lockedScore < MIN_MATCH_SCORE - 0.08 && bestVotes < 2) {
+      // Если 3 кадра подряд в рамке нет подходящего товара (например, стена или пустой стол) — сбрасываем прошлый товар
+      if (emptyStreak >= 3) {
         lockedProduct = null;
-        lockedStreak = 0;
-        pluEl.textContent = '----';
-        nameEl.textContent = 'Товар не распознан';
-        boxEl.classList.add('dimmed');
-        statusEl.textContent = 'Нет совпадения';
-        statusEl.className = 'status-pill unknown';
+        showIdlePrompt('Поиск...', 'Поместите товар в рамку');
+      } else if (lockedProduct) {
+        const st = document.getElementById('matchStatus');
+        st.textContent = 'Уточнение...';
+        st.className = 'status-pill low';
       }
     } else {
-      if (bestPlu && bestVotes >= 3) {
-        const found = products.find(p => p.plu === bestPlu);
-        if (found) {
-          lockedProduct = found;
-          lockedStreak = 1;
-          pluEl.textContent = found.plu;
-          nameEl.textContent = found.name;
-          boxEl.classList.remove('dimmed');
-          statusEl.textContent = top.score >= STRONG_MATCH_SCORE ? 'Товар определён' : 'Уточнение';
-          statusEl.className = top.score >= STRONG_MATCH_SCORE ? 'status-pill' : 'status-pill low';
+      emptyStreak = 0;
+      voteHistory.push(candidatePlu);
+      if (voteHistory.length > HISTORY_SIZE) voteHistory.shift();
+
+      const counts = {};
+      for (const plu of voteHistory) {
+        if (plu) counts[plu] = (counts[plu] || 0) + 1;
+      }
+
+      let bestPlu = candidatePlu;
+      let bestVotes = counts[candidatePlu] || 1;
+      for (const [plu, c] of Object.entries(counts)) {
+        if (c > bestVotes) {
+          bestVotes = c;
+          bestPlu = plu;
         }
-      } else {
-        pluEl.textContent = '----';
-        nameEl.textContent = 'Поместите товар в рамку';
-        boxEl.classList.add('dimmed');
-        statusEl.textContent = 'Поиск...';
-        statusEl.className = 'status-pill unknown';
+      }
+
+      const candidateProduct = products.find(p => p.plu === bestPlu) || top.product;
+
+      // Переключаемся на новый товар быстро: если он ещё не зафиксирован (хватит 2 голосов),
+      // либо если это другой товар с 2+ голосами и его оценка не хуже текущего зафиксированного
+      const currentLockedObj = lockedProduct
+        ? scored.find(s => s.product.plu === lockedProduct.plu)
+        : null;
+      const lockedScore = currentLockedObj ? currentLockedObj.score : 0;
+
+      if (!lockedProduct && bestVotes >= 2) {
+        lockedProduct = candidateProduct;
+      } else if (
+        lockedProduct &&
+        candidateProduct.plu !== lockedProduct.plu &&
+        bestVotes >= 2 &&
+        top.score >= lockedScore - 0.02
+      ) {
+        lockedProduct = candidateProduct;
+        voteHistory = [candidateProduct.plu, candidateProduct.plu];
+      }
+
+      if (lockedProduct) {
+        const activeObj = scored.find(s => s.product.plu === lockedProduct.plu) || top;
+        document.getElementById('mainPlu').textContent = lockedProduct.plu;
+        document.getElementById('mainName').textContent = lockedProduct.name;
+        document.getElementById('pluCopyBox').classList.remove('dimmed');
+        const st = document.getElementById('matchStatus');
+        st.textContent = activeObj.score >= STRONG_MATCH_SCORE ? 'Товар определён' : 'Уточнение';
+        st.className = activeObj.score >= STRONG_MATCH_SCORE ? 'status-pill' : 'status-pill low';
       }
     }
 
@@ -1076,6 +1077,7 @@
     confirmFrameBtn.disabled = true;
     await addSampleToProduct(target.plu, target.name, video);
     lockedProduct = target;
+    emptyStreak = 0;
     voteHistory = Array(HISTORY_SIZE).fill(target.plu);
     syncConfirmButton();
     showToast(`Кадр сохранён для PLU ${target.plu} (${target.samples.length})`);
@@ -1210,7 +1212,7 @@
     const found = products.find(p => p.plu === plu);
     if (found) {
       lockedProduct = found;
-      lockedStreak = 3;
+      emptyStreak = 0;
       voteHistory = Array(HISTORY_SIZE).fill(plu);
     }
     document.getElementById('mainPlu').textContent = plu;
@@ -1316,14 +1318,9 @@
 
   document.getElementById('resetStabilizerBtn').addEventListener('click', () => {
     resetStabilizer();
-    document.getElementById('mainPlu').textContent = '----';
-    document.getElementById('mainName').textContent = 'Поместите товар в рамку';
-    document.getElementById('pluCopyBox').classList.add('dimmed');
-    document.getElementById('matchStatus').textContent = 'Поиск...';
-    document.getElementById('matchStatus').className = 'status-pill unknown';
-    syncConfirmButton();
+    showIdlePrompt('Поиск...', 'Поместите товар в рамку');
     settingsModal.classList.remove('open');
-    showToast('Стабилизация сброшена');
+    showToast('Текущий товар сброшен');
   });
 
   document.getElementById('restoreBackupBtn').addEventListener('click', async () => {
@@ -1359,12 +1356,7 @@
       tx.objectStore(STORE_NAME).clear();
     } catch (_) {}
     renderDatabase();
-    document.getElementById('mainPlu').textContent = '----';
-    document.getElementById('mainName').textContent = 'Поместите товар в рамку';
-    document.getElementById('pluCopyBox').classList.add('dimmed');
-    document.getElementById('matchStatus').textContent = 'Ожидание';
-    document.getElementById('matchStatus').className = 'status-pill unknown';
-    syncConfirmButton();
+    showIdlePrompt('Ожидание', 'Поместите товар в рамку');
     settingsModal.classList.remove('open');
     showToast('Все локальные данные очищены');
   });
