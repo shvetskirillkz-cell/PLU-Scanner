@@ -165,17 +165,31 @@
 
   .scan-frame {
     position: absolute;
-    inset: 16%;
-    border: 2px dashed rgba(16, 185, 129, 0.7);
+    inset: 18%;
+    border: 2.5px solid rgba(16, 185, 129, 0.9);
     border-radius: 18px;
     pointer-events: none;
-    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.22);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.52);
+  }
+
+  .scan-caption {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(11, 17, 32, 0.78);
+    color: #e2e8f0;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+    pointer-events: none;
   }
 
   .camera-overlay-msg {
     position: absolute;
     inset: 0;
-    background: rgba(11, 17, 32, 0.88);
+    background: rgba(11, 17, 32, 0.9);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -239,48 +253,67 @@
     color: var(--text-muted);
   }
 
-  .confidence-pill {
+  .status-pill {
     font-size: 12px;
     font-weight: 700;
-    padding: 3px 9px;
+    padding: 3px 10px;
     border-radius: 999px;
     background: rgba(16, 185, 129, 0.16);
     color: var(--primary);
   }
 
-  .confidence-pill.low {
+  .status-pill.low {
     background: rgba(245, 158, 11, 0.16);
     color: var(--warning);
+  }
+
+  .status-pill.unknown {
+    background: rgba(148, 163, 184, 0.16);
+    color: var(--text-muted);
   }
 
   .plu-display {
     background: var(--surface-2);
     border: 2px solid var(--primary);
     border-radius: 14px;
-    padding: 14px;
+    padding: 16px 14px;
     text-align: center;
     margin: 10px 0;
     cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  .plu-display.dimmed {
+    border-color: var(--border);
   }
 
   .plu-code {
-    font-size: 46px;
+    font-size: 48px;
     font-weight: 900;
     letter-spacing: 2px;
     color: var(--primary);
     line-height: 1.05;
   }
 
+  .plu-display.dimmed .plu-code {
+    color: var(--text-muted);
+  }
+
   .plu-name {
-    font-size: 18px;
+    font-size: 19px;
     font-weight: 700;
-    margin-top: 4px;
+    margin-top: 6px;
   }
 
   .plu-hint {
     font-size: 11px;
     color: var(--text-muted);
     margin-top: 4px;
+  }
+
+  .confirm-bar {
+    margin-top: 8px;
+    margin-bottom: 10px;
   }
 
   .alt-list {
@@ -295,7 +328,7 @@
     align-items: center;
     justify-content: space-between;
     background: var(--surface-2);
-    padding: 9px 12px;
+    padding: 10px 12px;
     border-radius: 10px;
     font-size: 13px;
     cursor: pointer;
@@ -484,6 +517,7 @@
   <div class="camera-card">
     <video id="video" autoplay playsinline muted></video>
     <div class="scan-frame"></div>
+    <div class="scan-caption">Держите товар внутри рамки (фон не учитывается)</div>
     <div class="camera-overlay-msg" id="cameraOverlay">
       <div id="cameraOverlayText">Камера выключена</div>
       <button class="btn btn-primary" id="startCameraBtn">Включить камеру</button>
@@ -499,16 +533,22 @@
     <div class="result-card">
       <div class="result-top">
         <span class="result-label">Распознанный товар</span>
-        <span class="confidence-pill" id="matchConf">Ожидание</span>
+        <span class="status-pill unknown" id="matchStatus">Ожидание</span>
       </div>
 
-      <div class="plu-display" id="pluCopyBox" title="Нажмите, чтобы скопировать PLU">
+      <div class="plu-display dimmed" id="pluCopyBox" title="Нажмите, чтобы скопировать PLU">
         <div class="plu-code" id="mainPlu">----</div>
-        <div class="plu-name" id="mainName">Наведите камеру на товар</div>
+        <div class="plu-name" id="mainName">Поместите товар в рамку</div>
         <div class="plu-hint" id="pluHint">Нажмите на код, чтобы скопировать PLU</div>
       </div>
 
-      <div class="result-label" style="margin-top:8px;">Другие похожие варианты:</div>
+      <div class="confirm-bar">
+        <button class="btn btn-primary btn-block" id="confirmFrameBtn" disabled>
+          ✓ Верно — запомнить кадр
+        </button>
+      </div>
+
+      <div class="result-label" style="margin-top:8px;">Похожие товары в базе:</div>
       <div class="alt-list" id="altList">
         <div class="alt-item" style="color:var(--text-muted);cursor:default;">Добавьте товары во вкладке «Обучение / База»</div>
       </div>
@@ -531,7 +571,7 @@
 
       <div class="train-actions">
         <button class="btn btn-primary" id="captureOneBtn">📸 1 фото</button>
-        <button class="btn btn-accent" id="captureBurstBtn">⚡ Серия (5 фото)</button>
+        <button class="btn btn-accent" id="captureBurstBtn">⚡ Серия (6 фото)</button>
       </div>
 
       <label class="btn btn-block" style="margin-top:4px;">
@@ -565,640 +605,9 @@
       <button class="icon-btn" id="closeSettingsBtn">✕</button>
     </div>
     <p style="font-size:13px;color:var(--text-muted);line-height:1.45;">
-      Текущий движок: <strong id="modalEngineInfo" style="color:var(--text);">Локальный визуальный анализ</strong>.<br>
-      Если сеть нестабильна или заблокированы внешние скрипты, локальный движок работает полностью автономно без интернета.
+      Текущий движок: <strong id="modalEngineInfo" style="color:var(--text);">Локальный ИИ (фокус на рамке)</strong>.<br>
+      Анализируется область внутри рамки, сглаживание убирает метание между PLU, а кнопка подтверждения добавляет удачные кадры в базу товара.
     </p>
     <div class="modal-actions">
-      <button class="btn" id="retryEngineBtn">🔄 Перезапустить распознавание</button>
-      <button class="btn" id="restoreBackupBtn">🛟 Восстановить базу из резервной копии</button>
-      <button class="btn btn-danger" id="clearAllDataBtn">🗑️ Сбросить локальные данные</button>
-    </div>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-<canvas id="workCanvas" width="96" height="96" hidden></canvas>
-
-<script>
-(() => {
-  'use strict';
-
-  const DB_NAME = 'plu_scanner_db_v2';
-  const STORE_NAME = 'products';
-  const BACKUP_KEY = 'plu_scanner_backup_v2';
-
-  let products = [];
-  let stream = null;
-  let facingMode = 'environment';
-  let activeTab = 'cashier';
-  let scanTimer = null;
-  let engineMode = 'local';
-  let tfModel = null;
-
-  const video = document.getElementById('video');
-  const canvas = document.getElementById('workCanvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-  const engineDot = document.getElementById('engineDot');
-  const engineText = document.getElementById('engineText');
-  const modalEngineInfo = document.getElementById('modalEngineInfo');
-  const cameraOverlay = document.getElementById('cameraOverlay');
-  const cameraOverlayText = document.getElementById('cameraOverlayText');
-
-  function showToast(msg) {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.classList.add('show');
-    clearTimeout(t._timer);
-    t._timer = setTimeout(() => t.classList.remove('show'), 2400);
-  }
-
-  function openIDB() {
-    return new Promise((resolve, reject) => {
-      if (!window.indexedDB) return reject(new Error('No IDB'));
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
-
-  async function saveAllProducts() {
-    try {
-      localStorage.setItem(BACKUP_KEY, JSON.stringify(products));
-    } catch (e) {
-      try {
-        const slim = products.map(p => ({ ...p, thumb: '' }));
-        localStorage.setItem(BACKUP_KEY, JSON.stringify(slim));
-      } catch (_) {}
-    }
-
-    try {
-      const db = await openIDB();
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      store.clear();
-      for (const item of products) {
-        store.put(item);
-      }
-    } catch (_) {}
-  }
-
-  async function loadAllProducts() {
-    try {
-      const db = await openIDB();
-      const items = await new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, 'readonly');
-        const req = tx.objectStore(STORE_NAME).getAll();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
-      });
-      if (items.length > 0) {
-        products = items;
-        return;
-      }
-    } catch (_) {}
-
-    try {
-      const raw = localStorage.getItem(BACKUP_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) products = parsed;
-      }
-    } catch (_) {
-      products = [];
-    }
-  }
-
-  function setEngineReady(mode, label) {
-    engineMode = mode;
-    engineDot.classList.add('ready');
-    engineText.textContent = label;
-    modalEngineInfo.textContent = label;
-  }
-
-  function loadScriptWithTimeout(src, timeoutMs = 3000) {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.async = true;
-      const timer = setTimeout(() => {
-        s.remove();
-        reject(new Error('Timeout'));
-      }, timeoutMs);
-      s.onload = () => { clearTimeout(timer); resolve(); };
-      s.onerror = () => { clearTimeout(timer); s.remove(); reject(new Error('Error')); };
-      document.head.appendChild(s);
-    });
-  }
-
-  async function initVisionEngine() {
-    engineDot.classList.remove('ready');
-    engineText.textContent = 'Инициализация (до 3 сек)...';
-    setEngineReady('local', 'Локальный ИИ (автономный)');
-
-    try {
-      const raceTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('3s limit')), 3000));
-      await Promise.race([
-        (async () => {
-          await loadScriptWithTimeout('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js', 2500);
-          await loadScriptWithTimeout('https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js', 2500);
-          if (window.mobilenet) {
-            tfModel = await window.mobilenet.load({ version: 2, alpha: 0.5 });
-          }
-        })(),
-        raceTimeout
-      ]);
-
-      if (tfModel) {
-        const compatible = products.every(p => !p.samples.length || p.samples[0].length > 100);
-        if (compatible) {
-          setEngineReady('tfjs', 'MobileNet ИИ (онлайн)');
-        }
-      }
-    } catch (_) {
-      setEngineReady('local', 'Локальный ИИ (автономный)');
-    }
-  }
-
-  function extractLocalDescriptor(sourceEl) {
-    const size = 96;
-    canvas.width = size;
-    canvas.height = size;
-    ctx.drawImage(sourceEl, 0, 0, size, size);
-    const img = ctx.getImageData(0, 0, size, size).data;
-
-    const histH = new Float32Array(24);
-    const histS = new Float32Array(8);
-    const histV = new Float32Array(8);
-    const edgeHist = new Float32Array(8);
-    const gray = new Float32Array(size * size);
-
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const idx = (y * size + x) * 4;
-        const r = img[idx] / 255;
-        const g = img[idx + 1] / 255;
-        const b = img[idx + 2] / 255;
-
-        const max = Math.max(r, g, b);
-        const min = Math.min(r, g, b);
-        const d = max - min;
-        const v = max;
-        const s = max === 0 ? 0 : d / max;
-        let h = 0;
-        if (d !== 0) {
-          if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-          else if (max === g) h = ((b - r) / d + 2) / 6;
-          else h = ((r - g) / d + 4) / 6;
-        }
-
-        const isCenter = x >= 20 && x < 76 && y >= 20 && y < 76;
-        const weight = isCenter ? 2.2 : 0.6;
-
-        const hBin = Math.min(23, Math.floor(h * 24));
-        const sBin = Math.min(7, Math.floor(s * 8));
-        const vBin = Math.min(7, Math.floor(v * 8));
-
-        if (s > 0.12) {
-          histH[hBin] += weight;
-        }
-        histS[sBin] += weight;
-        histV[vBin] += weight;
-
-        gray[y * size + x] = 0.299 * r + 0.587 * g + 0.114 * b;
-      }
-    }
-
-    for (let y = 20; y < 75; y++) {
-      for (let x = 20; x < 75; x++) {
-        const i = y * size + x;
-        const dx = Math.abs(gray[i + 1] - gray[i]);
-        const dy = Math.abs(gray[i + size] - gray[i]);
-        const mag = Math.min(0.999, (dx + dy) * 2.5);
-        edgeHist[Math.floor(mag * 8)] += 1;
-      }
-    }
-
-    const rawVec = [...histH, ...histS, ...histV, ...edgeHist];
-    let norm = 0;
-    for (let i = 0; i < rawVec.length; i++) norm += rawVec[i] * rawVec[i];
-    norm = Math.sqrt(norm) || 1;
-    return rawVec.map(v => Number((v / norm).toFixed(5)));
-  }
-
-  async function extractFeatures(sourceEl) {
-    if (engineMode === 'tfjs' && tfModel && window.tf) {
-      try {
-        const emb = window.tf.tidy(() => {
-          const activation = tfModel.infer(sourceEl, true);
-          const norm = window.tf.norm(activation);
-          return activation.div(norm);
-        });
-        const data = Array.from(await emb.data());
-        emb.dispose();
-        return data.map(v => Number(v.toFixed(5)));
-      } catch (_) {
-        setEngineReady('local', 'Локальный ИИ (автономный)');
-      }
-    }
-    return extractLocalDescriptor(sourceEl);
-  }
-
-  function cosineSimilarity(a, b) {
-    if (!a || !b || a.length !== b.length) return 0;
-    let dot = 0;
-    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-    return dot;
-  }
-
-  function makeThumbnail(sourceEl) {
-    const tCanvas = document.createElement('canvas');
-    tCanvas.width = 72;
-    tCanvas.height = 72;
-    const tCtx = tCanvas.getContext('2d');
-    tCtx.drawImage(sourceEl, 0, 0, 72, 72);
-    return tCanvas.toDataURL('image/jpeg', 0.65);
-  }
-
-  async function startCamera() {
-    stopCamera();
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      cameraOverlayText.textContent = 'Браузер не поддерживает камеру или страница открыта без HTTPS.';
-      cameraOverlay.classList.remove('hidden');
-      return;
-    }
-
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false
-      });
-      video.srcObject = stream;
-      await video.play();
-      cameraOverlay.classList.add('hidden');
-      document.getElementById('toggleCameraBtn').textContent = '⏹ Выкл. камеру';
-      startScanLoop();
-    } catch (err) {
-      cameraOverlayText.textContent = 'Нет доступа к камере. Разрешите камеру в настройках браузера или загрузите фото из галереи.';
-      cameraOverlay.classList.remove('hidden');
-    }
-  }
-
-  function stopCamera() {
-    clearInterval(scanTimer);
-    scanTimer = null;
-    if (stream) {
-      stream.getTracks().forEach(t => t.stop());
-      stream = null;
-    }
-    video.srcObject = null;
-    cameraOverlayText.textContent = 'Камера выключена';
-    cameraOverlay.classList.remove('hidden');
-    document.getElementById('toggleCameraBtn').textContent = '▶️ Вкл. камеру';
-  }
-
-  function startScanLoop() {
-    clearInterval(scanTimer);
-    scanTimer = setInterval(async () => {
-      if (activeTab !== 'cashier' || !stream || video.readyState < 2) return;
-      if (products.length === 0) return;
-
-      const vec = await extractFeatures(video);
-      const scored = products.map(p => {
-        let best = 0;
-        for (const s of p.samples) {
-          const sim = cosineSimilarity(vec, s);
-          if (sim > best) best = sim;
-        }
-        return { product: p, score: best };
-      }).sort((a, b) => b.score - a.score);
-
-      renderPrediction(scored);
-    }, 450);
-  }
-
-  function renderPrediction(scored) {
-    const top = scored[0];
-    if (!top) return;
-
-    const pct = Math.max(0, Math.min(99, Math.round(top.score * 100)));
-    const confEl = document.getElementById('matchConf');
-    confEl.textContent = `Совпадение ${pct}%`;
-    confEl.classList.toggle('low', pct < 75);
-
-    document.getElementById('mainPlu').textContent = top.product.plu;
-    document.getElementById('mainName').textContent = top.product.name;
-
-    const altList = document.getElementById('altList');
-    const alts = scored.slice(1, 4);
-    if (alts.length === 0) {
-      altList.innerHTML = '<div class="alt-item" style="color:var(--text-muted);cursor:default;">Нет других товаров в базе</div>';
-    } else {
-      altList.innerHTML = alts.map(a => {
-        const p = Math.max(0, Math.min(99, Math.round(a.score * 100)));
-        return `<div class="alt-item" data-plu="${escapeHtml(a.product.plu)}" data-name="${escapeHtml(a.product.name)}">
-          <span><strong>${escapeHtml(a.product.plu)}</strong> — ${escapeHtml(a.product.name)}</span>
-          <span style="color:var(--text-muted);">${p}%</span>
-        </div>`;
-      }).join('');
-    }
-  }
-
-  async function addSampleToProduct(plu, name, sourceEl) {
-    const vec = await extractFeatures(sourceEl);
-    const thumb = makeThumbnail(sourceEl);
-
-    let existing = products.find(p => p.plu === plu);
-    if (existing) {
-      existing.name = name || existing.name;
-      existing.samples.push(vec);
-      if (existing.samples.length > 25) existing.samples.shift();
-      if (thumb) existing.thumb = thumb;
-    } else {
-      products.unshift({
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        plu,
-        name,
-        samples: [vec],
-        thumb
-      });
-    }
-    await saveAllProducts();
-    renderDatabase();
-  }
-
-  function getValidatedInputs() {
-    const plu = document.getElementById('inputPlu').value.trim();
-    const name = document.getElementById('inputName').value.trim();
-    if (!plu || !name) {
-      showToast('Введите PLU-код и название товара');
-      return null;
-    }
-    return { plu, name };
-  }
-
-  document.getElementById('captureOneBtn').addEventListener('click', async () => {
-    const data = getValidatedInputs();
-    if (!data) return;
-    if (!stream || video.readyState < 2) {
-      showToast('Сначала включите камеру');
-      return;
-    }
-    await addSampleToProduct(data.plu, data.name, video);
-    showToast(`Сохранено фото для PLU ${data.plu}`);
-  });
-
-  document.getElementById('captureBurstBtn').addEventListener('click', async () => {
-    const data = getValidatedInputs();
-    if (!data) return;
-    if (!stream || video.readyState < 2) {
-      showToast('Сначала включите камеру');
-      return;
-    }
-    const btn = document.getElementById('captureBurstBtn');
-    btn.disabled = true;
-    for (let i = 1; i <= 5; i++) {
-      btn.textContent = `Снимок ${i}/5...`;
-      await addSampleToProduct(data.plu, data.name, video);
-      await new Promise(r => setTimeout(r, 260));
-    }
-    btn.textContent = '⚡ Серия (5 фото)';
-    btn.disabled = false;
-    showToast(`Добавлено 5 образцов для PLU ${data.plu}`);
-  });
-
-  document.getElementById('galleryInput').addEventListener('change', async (e) => {
-    const data = getValidatedInputs();
-    const files = Array.from(e.target.files || []);
-    if (!data || files.length === 0) {
-      e.target.value = '';
-      return;
-    }
-
-    for (const file of files) {
-      const img = await new Promise((resolve) => {
-        const el = new Image();
-        el.onload = () => resolve(el);
-        el.onerror = () => resolve(null);
-        el.src = URL.createObjectURL(file);
-      });
-      if (img) {
-        await addSampleToProduct(data.plu, data.name, img);
-        URL.revokeObjectURL(img.src);
-      }
-    }
-    e.target.value = '';
-    showToast(`Загружено фото: ${files.length} шт.`);
-  });
-
-  function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, m => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[m]));
-  }
-
-  function renderDatabase() {
-    document.getElementById('dbCount').textContent = products.length;
-    const list = document.getElementById('dbList');
-
-    if (products.length === 0) {
-      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:14px;">База пока пуста. Добавьте первый овощ или фрукт выше.</div>';
-    } else {
-      list.innerHTML = products.map(p => `
-        <div class="product-item">
-          ${p.thumb ? `<img class="product-thumb" src="${p.thumb}" alt="">` : `<div class="product-thumb" style="display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--primary);">${escapeHtml(p.plu)}</div>`}
-          <div class="product-info">
-            <div class="product-plu">PLU ${escapeHtml(p.plu)}</div>
-            <div class="product-name">${escapeHtml(p.name)}</div>
-            <div class="product-meta">Образцов: ${p.samples.length}</div>
-          </div>
-          <button class="btn btn-danger" style="padding:8px 10px;" data-del-id="${escapeHtml(p.id)}">🗑️</button>
-        </div>
-      `).join('');
-    }
-    renderQuickSearch();
-  }
-
-  function renderQuickSearch() {
-    const q = document.getElementById('quickSearchInput').value.trim().toLowerCase();
-    const container = document.getElementById('quickSearchList');
-    if (!q) {
-      container.innerHTML = '';
-      return;
-    }
-    const filtered = products.filter(p => p.plu.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)).slice(0, 8);
-    container.innerHTML = filtered.map(p => `
-      <div class="alt-item" data-plu="${escapeHtml(p.plu)}" data-name="${escapeHtml(p.name)}">
-        <span><strong>${escapeHtml(p.plu)}</strong> — ${escapeHtml(p.name)}</span>
-        <span style="color:var(--primary);font-weight:600;">Выбрать</span>
-      </div>
-    `).join('');
-  }
-
-  document.getElementById('dbList').addEventListener('click', async (e) => {
-    const btn = e.target.closest('[data-del-id]');
-    if (!btn) return;
-    const id = btn.getAttribute('data-del-id');
-    products = products.filter(p => p.id !== id);
-    await saveAllProducts();
-    renderDatabase();
-    showToast('Товар удалён из базы');
-  });
-
-  document.body.addEventListener('click', (e) => {
-    const alt = e.target.closest('.alt-item[data-plu]');
-    if (!alt) return;
-    const plu = alt.getAttribute('data-plu');
-    const name = alt.getAttribute('data-name');
-    document.getElementById('mainPlu').textContent = plu;
-    document.getElementById('mainName').textContent = name;
-    copyPlu(plu);
-  });
-
-  function copyPlu(plu) {
-    if (!plu || plu === '----') return;
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(plu).catch(() => {});
-    }
-    showToast(`PLU ${plu} скопирован`);
-  }
-
-  document.getElementById('pluCopyBox').addEventListener('click', () => {
-    copyPlu(document.getElementById('mainPlu').textContent);
-  });
-
-  document.getElementById('quickSearchInput').addEventListener('input', renderQuickSearch);
-
-  document.getElementById('exportDbBtn').addEventListener('click', () => {
-    if (products.length === 0) {
-      showToast('База пуста — нечего сохранять');
-      return;
-    }
-    const payload = JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), products }, null, 2);
-    const blob = new Blob([payload], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `plu-baza-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Файл базы скачан');
-  });
-
-  document.getElementById('importDbInput').addEventListener('change', async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      const imported = Array.isArray(parsed) ? parsed : parsed.products;
-      if (!Array.isArray(imported)) throw new Error('Invalid format');
-
-      for (const item of imported) {
-        if (!item.plu || !item.name || !Array.isArray(item.samples)) continue;
-        const existing = products.find(p => p.plu === String(item.plu));
-        if (existing) {
-          existing.name = String(item.name);
-          existing.samples.push(...item.samples);
-          if (existing.samples.length > 25) existing.samples = existing.samples.slice(-25);
-          if (item.thumb) existing.thumb = item.thumb;
-        } else {
-          products.push({
-            id: item.id || Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            plu: String(item.plu),
-            name: String(item.name),
-            samples: item.samples,
-            thumb: item.thumb || ''
-          });
-        }
-      }
-      await saveAllProducts();
-      renderDatabase();
-      showToast(`База загружена: ${products.length} поз.`);
-    } catch (_) {
-      showToast('Ошибка чтения файла базы');
-    }
-    e.target.value = '';
-  });
-
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      activeTab = btn.getAttribute('data-tab');
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
-      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${activeTab}`));
-    });
-  });
-
-  document.getElementById('startCameraBtn').addEventListener('click', startCamera);
-  document.getElementById('toggleCameraBtn').addEventListener('click', () => {
-    if (stream) stopCamera();
-    else startCamera();
-  });
-  document.getElementById('switchCameraBtn').addEventListener('click', () => {
-    facingMode = facingMode === 'environment' ? 'user' : 'environment';
-    startCamera();
-  });
-
-  const settingsModal = document.getElementById('settingsModal');
-  document.getElementById('openSettingsBtn').addEventListener('click', () => settingsModal.classList.add('open'));
-  document.getElementById('closeSettingsBtn').addEventListener('click', () => settingsModal.classList.remove('open'));
-
-  document.getElementById('retryEngineBtn').addEventListener('click', async () => {
-    settingsModal.classList.remove('open');
-    await initVisionEngine();
-    showToast('Движок распознавания перезапущен');
-  });
-
-  document.getElementById('restoreBackupBtn').addEventListener('click', async () => {
-    try {
-      const raw = localStorage.getItem(BACKUP_KEY);
-      if (!raw) {
-        showToast('Резервная копия не найдена');
-        return;
-      }
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        products = parsed;
-        await saveAllProducts();
-        renderDatabase();
-        showToast(`Восстановлено товаров: ${products.length}`);
-      } else {
-        showToast('Резервная копия пуста');
-      }
-    } catch (_) {
-      showToast('Не удалось восстановить резервную копию');
-    }
-    settingsModal.classList.remove('open');
-  });
-
-  document.getElementById('clearAllDataBtn').addEventListener('click', async () => {
-    products = [];
-    localStorage.removeItem(BACKUP_KEY);
-    try {
-      const db = await openIDB();
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).clear();
-    } catch (_) {}
-    renderDatabase();
-    document.getElementById('mainPlu').textContent = '----';
-    document.getElementById('mainName').textContent = 'Наведите камеру на товар';
-    settingsModal.classList.remove('open');
-    showToast('Все локальные данные очищены');
-  });
-
-  (async () => {
-    await loadAllProducts();
-    renderDatabase();
-    await initVisionEngine();
-    startCamera();
-  })();
-})();
-</script>
-</body>
-</html>
+      <button class="btn" id="resetStabilizerBtn">🎯 Сбросить стабилизацию кадров</button>
+      <button class="btn" id
