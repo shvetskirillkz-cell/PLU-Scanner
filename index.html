@@ -89,9 +89,8 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--warning);
+    background: var(--primary);
   }
-  .status-dot.ready { background: var(--primary); }
 
   .icon-btn {
     background: var(--surface-2);
@@ -498,10 +497,10 @@
   <div class="brand">
     <div class="brand-badge">PLU</div>
     <div>
-      <div class="brand-title">PLU Сканер ИИ</div>
+      <div class="brand-title">PLU Сканер</div>
       <div class="engine-status">
         <span class="status-dot" id="engineDot"></span>
-        <span id="engineText">Запуск движка...</span>
+        <span id="engineText">Готов (фокус на рамке)</span>
       </div>
     </div>
   </div>
@@ -519,13 +518,13 @@
     <div class="scan-frame"></div>
     <div class="scan-caption">Держите товар внутри рамки (фон не учитывается)</div>
     <div class="camera-overlay-msg" id="cameraOverlay">
-      <div id="cameraOverlayText">Камера выключена</div>
+      <div id="cameraOverlayText">Нажмите «Включить камеру» для начала работы</div>
       <button class="btn btn-primary" id="startCameraBtn">Включить камеру</button>
     </div>
   </div>
 
   <div class="camera-controls">
-    <button class="btn" id="toggleCameraBtn" style="flex:1;">⏹ Выкл. камеру</button>
+    <button class="btn" id="toggleCameraBtn" style="flex:1;">▶️ Вкл. камеру</button>
     <button class="btn" id="switchCameraBtn">🔄 Камера</button>
   </div>
 
@@ -605,9 +604,784 @@
       <button class="icon-btn" id="closeSettingsBtn">✕</button>
     </div>
     <p style="font-size:13px;color:var(--text-muted);line-height:1.45;">
-      Текущий движок: <strong id="modalEngineInfo" style="color:var(--text);">Локальный ИИ (фокус на рамке)</strong>.<br>
+      Режим работы: <strong id="modalEngineInfo" style="color:var(--text);">Готов (фокус на рамке)</strong>.<br>
       Анализируется область внутри рамки, сглаживание убирает метание между PLU, а кнопка подтверждения добавляет удачные кадры в базу товара.
     </p>
     <div class="modal-actions">
       <button class="btn" id="resetStabilizerBtn">🎯 Сбросить стабилизацию кадров</button>
-      <button class="btn" id
+      <button class="btn" id="restoreBackupBtn">🛟 Восстановить базу из резервной копии</button>
+      <button class="btn btn-danger" id="clearAllDataBtn">🗑️ Сбросить локальные данные</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<canvas id="cropCanvas" width="96" height="96" hidden></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const DB_NAME = 'plu_scanner_db_v3';
+  const STORE_NAME = 'products';
+  const BACKUP_KEY = 'plu_scanner_backup_v3';
+
+  const ROI_RATIO = 0.64;
+  const HISTORY_SIZE = 7;
+  const MIN_MATCH_SCORE = 0.72;
+  const STRONG_MATCH_SCORE = 0.81;
+
+  let products = [];
+  let stream = null;
+  let facingMode = 'environment';
+  let activeTab = 'cashier';
+  let scanTimer = null;
+
+  let voteHistory = [];
+  let lockedProduct = null;
+  let lockedStreak = 0;
+
+  const video = document.getElementById('video');
+  const cropCanvas = document.getElementById('cropCanvas');
+  const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+
+  const engineText = document.getElementById('engineText');
+  const modalEngineInfo = document.getElementById('modalEngineInfo');
+  const cameraOverlay = document.getElementById('cameraOverlay');
+  const cameraOverlayText = document.getElementById('cameraOverlayText');
+  const confirmFrameBtn = document.getElementById('confirmFrameBtn');
+
+  function showToast(msg) {
+    try {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.remove('show'), 2200);
+    } catch (_) {}
+  }
+
+  function setStatusText(label) {
+    if (engineText) engineText.textContent = label;
+    if (modalEngineInfo) modalEngineInfo.textContent = label;
+  }
+
+  function syncConfirmButton() {
+    const currentPlu = document.getElementById('mainPlu').textContent;
+    const hasCamera = Boolean(stream && video.readyState >= 2);
+    const hasProduct = Boolean(currentPlu && currentPlu !== '----' && products.some(p => p.plu === currentPlu));
+    confirmFrameBtn.disabled = !(hasCamera && hasProduct);
+  }
+
+  function resetStabilizer() {
+    voteHistory = [];
+    lockedProduct = null;
+    lockedStreak = 0;
+    syncConfirmButton();
+  }
+
+  function openIDB() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) return reject(new Error('No IDB'));
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function saveAllProducts() {
+    try {
+      localStorage.setItem(BACKUP_KEY, JSON.stringify(products));
+    } catch (_) {
+      try {
+        const slim = products.map(p => ({ ...p, thumb: '' }));
+        localStorage.setItem(BACKUP_KEY, JSON.stringify(slim));
+      } catch (__) {}
+    }
+
+    try {
+      const db = await openIDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.clear();
+      for (const item of products) {
+        store.put(item);
+      }
+    } catch (_) {}
+  }
+
+  async function loadAllProducts() {
+    try {
+      const db = await openIDB();
+      const items = await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const req = tx.objectStore(STORE_NAME).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+      if (items.length > 0) {
+        products = items;
+        return;
+      }
+    } catch (_) {}
+
+    try {
+      const raw = localStorage.getItem(BACKUP_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) products = parsed;
+      }
+    } catch (_) {
+      products = [];
+    }
+  }
+
+  function drawCroppedRoi(sourceEl, targetSize) {
+    const srcW = sourceEl.videoWidth || sourceEl.naturalWidth || sourceEl.width || 640;
+    const srcH = sourceEl.videoHeight || sourceEl.naturalHeight || sourceEl.height || 480;
+
+    const roiW = Math.max(24, srcW * ROI_RATIO);
+    const roiH = Math.max(24, srcH * ROI_RATIO);
+    const sx = (srcW - roiW) / 2;
+    const sy = (srcH - roiH) / 2;
+
+    cropCanvas.width = targetSize;
+    cropCanvas.height = targetSize;
+    cropCtx.clearRect(0, 0, targetSize, targetSize);
+    cropCtx.drawImage(sourceEl, sx, sy, roiW, roiH, 0, 0, targetSize, targetSize);
+  }
+
+  function extractForegroundDescriptor(sourceEl) {
+    const size = 64;
+    drawCroppedRoi(sourceEl, size);
+    const img = cropCtx.getImageData(0, 0, size, size).data;
+
+    let sumLum = 0;
+    const nPixels = size * size;
+    const lumArr = new Float32Array(nPixels);
+    for (let i = 0, p = 0; i < img.length; i += 4, p++) {
+      const lum = (0.299 * img[i] + 0.587 * img[i + 1] + 0.114 * img[i + 2]) / 255;
+      lumArr[p] = lum;
+      sumLum += lum;
+    }
+    const meanLum = sumLum / nPixels || 0.5;
+    const gain = Math.min(1.8, Math.max(0.55, 0.48 / Math.max(0.12, meanLum)));
+
+    const histH = new Float32Array(18);
+    const histS = new Float32Array(6);
+    const gridVec = new Float32Array(3 * 3 * 4);
+    const edgeHist = new Float32Array(6);
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const idx = (y * size + x) * 4;
+        const r = Math.min(1, (img[idx] / 255) * gain);
+        const g = Math.min(1, (img[idx + 1] / 255) * gain);
+        const b = Math.min(1, (img[idx + 2] / 255) * gain);
+
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const d = max - min;
+        const s = max === 0 ? 0 : d / max;
+        let h = 0;
+        if (d !== 0) {
+          if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+          else if (max === g) h = ((b - r) / d + 2) / 6;
+          else h = ((r - g) / d + 4) / 6;
+        }
+
+        const dxCenter = (x - size / 2) / (size / 2);
+        const dyCenter = (y - size / 2) / (size / 2);
+        const centerWeight = Math.max(0.45, 1.25 - 0.55 * (dxCenter * dxCenter + dyCenter * dyCenter));
+
+        if (s > 0.14) {
+          const hBin = Math.min(17, Math.floor(h * 18));
+          histH[hBin] += centerWeight * (0.5 + s);
+        }
+        const sBin = Math.min(5, Math.floor(s * 6));
+        histS[sBin] += centerWeight;
+
+        const gx = Math.min(2, Math.floor((x / size) * 3));
+        const gy = Math.min(2, Math.floor((y / size) * 3));
+        const cellBase = (gy * 3 + gx) * 4;
+        gridVec[cellBase] += r;
+        gridVec[cellBase + 1] += g;
+        gridVec[cellBase + 2] += b;
+      }
+    }
+
+    for (let y = 1; y < size - 1; y++) {
+      for (let x = 1; x < size - 1; x++) {
+        const i = y * size + x;
+        const gxEdge = Math.abs(lumArr[i + 1] - lumArr[i - 1]) * gain;
+        const gyEdge = Math.abs(lumArr[i + size] - lumArr[i - size]) * gain;
+        const mag = Math.min(0.999, Math.hypot(gxEdge, gyEdge) * 1.6);
+        const eBin = Math.min(5, Math.floor(mag * 6));
+        edgeHist[eBin] += 1;
+
+        const gx = Math.min(2, Math.floor((x / size) * 3));
+        const gy = Math.min(2, Math.floor((y / size) * 3));
+        gridVec[(gy * 3 + gx) * 4 + 3] += mag;
+      }
+    }
+
+    const cellPixels = (size / 3) * (size / 3);
+    for (let c = 0; c < 9; c++) {
+      gridVec[c * 4] /= cellPixels;
+      gridVec[c * 4 + 1] /= cellPixels;
+      gridVec[c * 4 + 2] /= cellPixels;
+      gridVec[c * 4 + 3] /= cellPixels;
+    }
+
+    const rawVec = [...histH, ...histS, ...edgeHist, ...gridVec];
+    let norm = 0;
+    for (let i = 0; i < rawVec.length; i++) norm += rawVec[i] * rawVec[i];
+    norm = Math.sqrt(norm) || 1;
+    return rawVec.map(v => Number((v / norm).toFixed(5)));
+  }
+
+  function cosineSimilarity(a, b) {
+    if (!a || !b || a.length !== b.length) return 0;
+    let dot = 0;
+    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+    return dot;
+  }
+
+  function scoreProduct(vec, product) {
+    if (!product.samples || product.samples.length === 0) return 0;
+
+    let maxSim = 0;
+    let sumSim = 0;
+    let count = 0;
+
+    for (const s of product.samples) {
+      if (!Array.isArray(s) || s.length !== vec.length) continue;
+      const sim = cosineSimilarity(vec, s);
+      if (sim > maxSim) maxSim = sim;
+      sumSim += sim;
+      count++;
+    }
+
+    if (count === 0) return 0;
+    const avgSim = sumSim / count;
+    return maxSim * 0.65 + avgSim * 0.35;
+  }
+
+  function makeThumbnail(sourceEl) {
+    drawCroppedRoi(sourceEl, 72);
+    return cropCanvas.toDataURL('image/jpeg', 0.7);
+  }
+
+  async function startCamera() {
+    stopCamera();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      cameraOverlayText.textContent = 'Браузер не поддерживает камеру или страница открыта без HTTPS.';
+      cameraOverlay.classList.remove('hidden');
+      syncConfirmButton();
+      return;
+    }
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      cameraOverlay.classList.add('hidden');
+      document.getElementById('toggleCameraBtn').textContent = '⏹ Выкл. камеру';
+      resetStabilizer();
+      startScanLoop();
+    } catch (_) {
+      cameraOverlayText.textContent = 'Нет доступа к камере. Разрешите камеру в настройках браузера или загрузите фото из галереи.';
+      cameraOverlay.classList.remove('hidden');
+      syncConfirmButton();
+    }
+  }
+
+  function stopCamera() {
+    clearInterval(scanTimer);
+    scanTimer = null;
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    video.srcObject = null;
+    resetStabilizer();
+    cameraOverlayText.textContent = 'Камера выключена';
+    cameraOverlay.classList.remove('hidden');
+    document.getElementById('toggleCameraBtn').textContent = '▶️ Вкл. камеру';
+  }
+
+  function startScanLoop() {
+    clearInterval(scanTimer);
+    scanTimer = setInterval(() => {
+      if (activeTab !== 'cashier' || !stream || video.readyState < 2) {
+        syncConfirmButton();
+        return;
+      }
+      if (products.length === 0) {
+        syncConfirmButton();
+        return;
+      }
+
+      const vec = extractForegroundDescriptor(video);
+      const scored = products
+        .map(p => ({ product: p, score: scoreProduct(vec, p) }))
+        .sort((a, b) => b.score - a.score);
+
+      updateStabilizedResult(scored);
+      syncConfirmButton();
+    }, 350);
+  }
+
+  function updateStabilizedResult(scored) {
+    const top = scored[0];
+    const second = scored[1];
+    const margin = second ? top.score - second.score : 1;
+
+    const candidate = (top && top.score >= MIN_MATCH_SCORE) ? top.product.plu : null;
+    voteHistory.push(candidate);
+    if (voteHistory.length > HISTORY_SIZE) voteHistory.shift();
+
+    const counts = {};
+    for (const plu of voteHistory) {
+      if (plu) counts[plu] = (counts[plu] || 0) + 1;
+    }
+
+    let bestPlu = null;
+    let bestVotes = 0;
+    for (const [plu, c] of Object.entries(counts)) {
+      if (c > bestVotes) {
+        bestVotes = c;
+        bestPlu = plu;
+      }
+    }
+
+    const statusEl = document.getElementById('matchStatus');
+    const boxEl = document.getElementById('pluCopyBox');
+    const pluEl = document.getElementById('mainPlu');
+    const nameEl = document.getElementById('mainName');
+
+    if (lockedProduct) {
+      const currentLockedScoreObj = scored.find(s => s.product.plu === lockedProduct.plu);
+      const lockedScore = currentLockedScoreObj ? currentLockedScoreObj.score : 0;
+
+      if (bestPlu === lockedProduct.plu && lockedScore >= MIN_MATCH_SCORE - 0.04) {
+        lockedStreak++;
+        pluEl.textContent = lockedProduct.plu;
+        nameEl.textContent = lockedProduct.name;
+        boxEl.classList.remove('dimmed');
+        statusEl.textContent = lockedScore >= STRONG_MATCH_SCORE ? 'Товар определён' : 'Удержание';
+        statusEl.className = 'status-pill';
+      } else if (bestPlu && bestPlu !== lockedProduct.plu && bestVotes >= 4 && margin >= 0.04) {
+        const nextProd = products.find(p => p.plu === bestPlu);
+        if (nextProd) {
+          lockedProduct = nextProd;
+          lockedStreak = 1;
+          pluEl.textContent = nextProd.plu;
+          nameEl.textContent = nextProd.name;
+          boxEl.classList.remove('dimmed');
+          statusEl.textContent = 'Товар определён';
+          statusEl.className = 'status-pill';
+        }
+      } else if (lockedScore < MIN_MATCH_SCORE - 0.08 && bestVotes < 2) {
+        lockedProduct = null;
+        lockedStreak = 0;
+        pluEl.textContent = '----';
+        nameEl.textContent = 'Товар не распознан';
+        boxEl.classList.add('dimmed');
+        statusEl.textContent = 'Нет совпадения';
+        statusEl.className = 'status-pill unknown';
+      }
+    } else {
+      if (bestPlu && bestVotes >= 3) {
+        const found = products.find(p => p.plu === bestPlu);
+        if (found) {
+          lockedProduct = found;
+          lockedStreak = 1;
+          pluEl.textContent = found.plu;
+          nameEl.textContent = found.name;
+          boxEl.classList.remove('dimmed');
+          statusEl.textContent = top.score >= STRONG_MATCH_SCORE ? 'Товар определён' : 'Уточнение';
+          statusEl.className = top.score >= STRONG_MATCH_SCORE ? 'status-pill' : 'status-pill low';
+        }
+      } else {
+        pluEl.textContent = '----';
+        nameEl.textContent = 'Поместите товар в рамку';
+        boxEl.classList.add('dimmed');
+        statusEl.textContent = 'Поиск...';
+        statusEl.className = 'status-pill unknown';
+      }
+    }
+
+    const altList = document.getElementById('altList');
+    const alts = scored
+      .filter(s => s.score >= MIN_MATCH_SCORE * 0.85 && (!lockedProduct || s.product.plu !== lockedProduct.plu))
+      .slice(0, 3);
+
+    if (alts.length === 0) {
+      altList.innerHTML = '<div class="alt-item" style="color:var(--text-muted);cursor:default;">Нет других близких позиций</div>';
+    } else {
+      altList.innerHTML = alts.map(a => `
+        <div class="alt-item" data-plu="${escapeHtml(a.product.plu)}" data-name="${escapeHtml(a.product.name)}">
+          <span><strong>${escapeHtml(a.product.plu)}</strong> — ${escapeHtml(a.product.name)}</span>
+          <span style="color:var(--primary);font-weight:600;">Выбрать</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  async function addSampleToProduct(plu, name, sourceEl) {
+    const vec = extractForegroundDescriptor(sourceEl);
+    const thumb = makeThumbnail(sourceEl);
+
+    let existing = products.find(p => p.plu === plu);
+    if (existing) {
+      existing.name = name || existing.name;
+      existing.samples.push(vec);
+      if (existing.samples.length > 30) existing.samples.shift();
+      if (thumb) existing.thumb = thumb;
+    } else {
+      products.unshift({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        plu,
+        name,
+        samples: [vec],
+        thumb
+      });
+    }
+    await saveAllProducts();
+    renderDatabase();
+    syncConfirmButton();
+  }
+
+  confirmFrameBtn.addEventListener('click', async () => {
+    const currentPlu = document.getElementById('mainPlu').textContent;
+    if (!stream || video.readyState < 2) {
+      showToast('Камера выключена');
+      return;
+    }
+    const target = products.find(p => p.plu === currentPlu);
+    if (!target) {
+      showToast('Сначала выберите или распознайте товар');
+      return;
+    }
+    confirmFrameBtn.disabled = true;
+    await addSampleToProduct(target.plu, target.name, video);
+    lockedProduct = target;
+    voteHistory = Array(HISTORY_SIZE).fill(target.plu);
+    syncConfirmButton();
+    showToast(`Кадр сохранён для PLU ${target.plu} (${target.samples.length})`);
+  });
+
+  function getValidatedInputs() {
+    const plu = document.getElementById('inputPlu').value.trim();
+    const name = document.getElementById('inputName').value.trim();
+    if (!plu || !name) {
+      showToast('Введите PLU-код и название товара');
+      return null;
+    }
+    return { plu, name };
+  }
+
+  document.getElementById('captureOneBtn').addEventListener('click', async () => {
+    const data = getValidatedInputs();
+    if (!data) return;
+    if (!stream || video.readyState < 2) {
+      showToast('Сначала включите камеру');
+      return;
+    }
+    resetStabilizer();
+    await addSampleToProduct(data.plu, data.name, video);
+    showToast(`Сохранено фото для PLU ${data.plu}`);
+  });
+
+  document.getElementById('captureBurstBtn').addEventListener('click', async () => {
+    const data = getValidatedInputs();
+    if (!data) return;
+    if (!stream || video.readyState < 2) {
+      showToast('Сначала включите камеру');
+      return;
+    }
+    resetStabilizer();
+    const btn = document.getElementById('captureBurstBtn');
+    btn.disabled = true;
+    for (let i = 1; i <= 6; i++) {
+      btn.textContent = `Снимок ${i}/6...`;
+      await addSampleToProduct(data.plu, data.name, video);
+      await new Promise(r => setTimeout(r, 260));
+    }
+    btn.textContent = '⚡ Серия (6 фото)';
+    btn.disabled = false;
+    showToast(`Добавлено 6 образцов для PLU ${data.plu}`);
+  });
+
+  document.getElementById('galleryInput').addEventListener('change', async (e) => {
+    const data = getValidatedInputs();
+    const files = Array.from(e.target.files || []);
+    if (!data || files.length === 0) {
+      e.target.value = '';
+      return;
+    }
+    resetStabilizer();
+    for (const file of files) {
+      const img = await new Promise((resolve) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => resolve(null);
+        el.src = URL.createObjectURL(file);
+      });
+      if (img) {
+        await addSampleToProduct(data.plu, data.name, img);
+        URL.revokeObjectURL(img.src);
+      }
+    }
+    e.target.value = '';
+    showToast(`Загружено фото: ${files.length} шт.`);
+  });
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, m => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[m]));
+  }
+
+  function renderDatabase() {
+    document.getElementById('dbCount').textContent = products.length;
+    const list = document.getElementById('dbList');
+
+    if (products.length === 0) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px;text-align:center;padding:14px;">База пока пуста. Поместите товар в рамку и добавьте его выше.</div>';
+    } else {
+      list.innerHTML = products.map(p => `
+        <div class="product-item">
+          ${p.thumb ? `<img class="product-thumb" src="${p.thumb}" alt="">` : `<div class="product-thumb" style="display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--primary);">${escapeHtml(p.plu)}</div>`}
+          <div class="product-info">
+            <div class="product-plu">PLU ${escapeHtml(p.plu)}</div>
+            <div class="product-name">${escapeHtml(p.name)}</div>
+            <div class="product-meta">Образцов: ${p.samples.length}</div>
+          </div>
+          <button class="btn btn-danger" style="padding:8px 10px;" data-del-id="${escapeHtml(p.id)}">🗑️</button>
+        </div>
+      `).join('');
+    }
+    renderQuickSearch();
+  }
+
+  function renderQuickSearch() {
+    const q = document.getElementById('quickSearchInput').value.trim().toLowerCase();
+    const container = document.getElementById('quickSearchList');
+    if (!q) {
+      container.innerHTML = '';
+      return;
+    }
+    const filtered = products.filter(p => p.plu.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)).slice(0, 8);
+    container.innerHTML = filtered.map(p => `
+      <div class="alt-item" data-plu="${escapeHtml(p.plu)}" data-name="${escapeHtml(p.name)}">
+        <span><strong>${escapeHtml(p.plu)}</strong> — ${escapeHtml(p.name)}</span>
+        <span style="color:var(--primary);font-weight:600;">Выбрать</span>
+      </div>
+    `).join('');
+  }
+
+  document.getElementById('dbList').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-del-id]');
+    if (!btn) return;
+    const id = btn.getAttribute('data-del-id');
+    products = products.filter(p => p.id !== id);
+    resetStabilizer();
+    await saveAllProducts();
+    renderDatabase();
+    showToast('Товар удалён из базы');
+  });
+
+  document.body.addEventListener('click', (e) => {
+    const alt = e.target.closest('.alt-item[data-plu]');
+    if (!alt) return;
+    const plu = alt.getAttribute('data-plu');
+    const name = alt.getAttribute('data-name');
+    const found = products.find(p => p.plu === plu);
+    if (found) {
+      lockedProduct = found;
+      lockedStreak = 3;
+      voteHistory = Array(HISTORY_SIZE).fill(plu);
+    }
+    document.getElementById('mainPlu').textContent = plu;
+    document.getElementById('mainName').textContent = name;
+    document.getElementById('pluCopyBox').classList.remove('dimmed');
+    document.getElementById('matchStatus').textContent = 'Выбрано вручную';
+    document.getElementById('matchStatus').className = 'status-pill';
+    syncConfirmButton();
+    copyPlu(plu);
+  });
+
+  function copyPlu(plu) {
+    if (!plu || plu === '----') return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(plu).catch(() => {});
+      }
+    } catch (_) {}
+    showToast(`PLU ${plu} скопирован`);
+  }
+
+  document.getElementById('pluCopyBox').addEventListener('click', () => {
+    copyPlu(document.getElementById('mainPlu').textContent);
+  });
+
+  document.getElementById('quickSearchInput').addEventListener('input', renderQuickSearch);
+
+  document.getElementById('exportDbBtn').addEventListener('click', () => {
+    if (products.length === 0) {
+      showToast('База пуста — нечего сохранять');
+      return;
+    }
+    const payload = JSON.stringify({ version: 3, exportedAt: new Date().toISOString(), products }, null, 2);
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `plu-baza-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Файл базы скачан');
+  });
+
+  document.getElementById('importDbInput').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const imported = Array.isArray(parsed) ? parsed : parsed.products;
+      if (!Array.isArray(imported)) throw new Error('Invalid format');
+
+      for (const item of imported) {
+        if (!item.plu || !item.name || !Array.isArray(item.samples)) continue;
+        const existing = products.find(p => p.plu === String(item.plu));
+        if (existing) {
+          existing.name = String(item.name);
+          existing.samples.push(...item.samples);
+          if (existing.samples.length > 30) existing.samples = existing.samples.slice(-30);
+          if (item.thumb) existing.thumb = item.thumb;
+        } else {
+          products.push({
+            id: item.id || Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            plu: String(item.plu),
+            name: String(item.name),
+            samples: item.samples,
+            thumb: item.thumb || ''
+          });
+        }
+      }
+      resetStabilizer();
+      await saveAllProducts();
+      renderDatabase();
+      showToast(`База загружена: ${products.length} поз.`);
+    } catch (_) {
+      showToast('Ошибка чтения файла базы');
+    }
+    e.target.value = '';
+  });
+
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeTab = btn.getAttribute('data-tab');
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${activeTab}`));
+      resetStabilizer();
+    });
+  });
+
+  document.getElementById('startCameraBtn').addEventListener('click', startCamera);
+  document.getElementById('toggleCameraBtn').addEventListener('click', () => {
+    if (stream) stopCamera();
+    else startCamera();
+  });
+  document.getElementById('switchCameraBtn').addEventListener('click', () => {
+    facingMode = facingMode === 'environment' ? 'user' : 'environment';
+    startCamera();
+  });
+
+  const settingsModal = document.getElementById('settingsModal');
+  document.getElementById('openSettingsBtn').addEventListener('click', () => settingsModal.classList.add('open'));
+  document.getElementById('closeSettingsBtn').addEventListener('click', () => settingsModal.classList.remove('open'));
+
+  document.getElementById('resetStabilizerBtn').addEventListener('click', () => {
+    resetStabilizer();
+    document.getElementById('mainPlu').textContent = '----';
+    document.getElementById('mainName').textContent = 'Поместите товар в рамку';
+    document.getElementById('pluCopyBox').classList.add('dimmed');
+    document.getElementById('matchStatus').textContent = 'Поиск...';
+    document.getElementById('matchStatus').className = 'status-pill unknown';
+    syncConfirmButton();
+    settingsModal.classList.remove('open');
+    showToast('Стабилизация сброшена');
+  });
+
+  document.getElementById('restoreBackupBtn').addEventListener('click', async () => {
+    try {
+      const raw = localStorage.getItem(BACKUP_KEY);
+      if (!raw) {
+        showToast('Резервная копия не найдена');
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        products = parsed;
+        resetStabilizer();
+        await saveAllProducts();
+        renderDatabase();
+        showToast(`Восстановлено товаров: ${products.length}`);
+      } else {
+        showToast('Резервная копия пуста');
+      }
+    } catch (_) {
+      showToast('Не удалось восстановить резервную копию');
+    }
+    settingsModal.classList.remove('open');
+  });
+
+  document.getElementById('clearAllDataBtn').addEventListener('click', async () => {
+    products = [];
+    resetStabilizer();
+    try { localStorage.removeItem(BACKUP_KEY); } catch (_) {}
+    try {
+      const db = await openIDB();
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).clear();
+    } catch (_) {}
+    renderDatabase();
+    document.getElementById('mainPlu').textContent = '----';
+    document.getElementById('mainName').textContent = 'Поместите товар в рамку';
+    document.getElementById('pluCopyBox').classList.add('dimmed');
+    document.getElementById('matchStatus').textContent = 'Ожидание';
+    document.getElementById('matchStatus').className = 'status-pill unknown';
+    syncConfirmButton();
+    settingsModal.classList.remove('open');
+    showToast('Все локальные данные очищены');
+  });
+
+  (async () => {
+    setStatusText('Готов (фокус на рамке)');
+    try {
+      await loadAllProducts();
+    } catch (_) {}
+    try {
+      renderDatabase();
+    } catch (_) {}
+    try {
+      syncConfirmButton();
+    } catch (_) {}
+  })();
+})();
+</script>
+</body>
+</html>
